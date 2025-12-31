@@ -1,0 +1,15 @@
+# Large frameworks
+Pods/
+*.framework
+
+# Xcode build
+build/
+DerivedData/
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+
+# CocoaPods - will reinstall with pod install
+Podfile.lock
+
+# OS files
+.DS_Store
