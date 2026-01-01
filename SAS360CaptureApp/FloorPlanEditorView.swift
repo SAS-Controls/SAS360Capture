@@ -42,6 +42,7 @@ struct FloorPlanEditorView: View {
     @State private var showingLabelInput = false
     @State private var newLabelText = ""
     @State private var newLabelPosition: CGPoint = .zero
+    @State private var showingPanoramaCapture = false
     
     // Floor plan image
     @State private var floorPlanImage: UIImage?
@@ -61,35 +62,28 @@ struct FloorPlanEditorView: View {
             Color.sasDarkBg.ignoresSafeArea()
             
             VStack(spacing: 0) {
-                // Toolbar
                 toolbarView
                 
-                // Canvas
                 GeometryReader { geometry in
                     ZStack {
                         Color.sasCardBg
                         
-                        // Floor plan image or grid
                         canvasContent
                             .scaleEffect(canvasScale)
                             .offset(canvasOffset)
                         
-                        // Drawing shapes
                         shapesLayer
                             .scaleEffect(canvasScale)
                             .offset(canvasOffset)
                         
-                        // Labels
                         labelsLayer
                             .scaleEffect(canvasScale)
                             .offset(canvasOffset)
                         
-                        // Hotspots
                         hotspotsLayer
                             .scaleEffect(canvasScale)
                             .offset(canvasOffset)
                         
-                        // Current drawing preview
                         if let start = currentDrawStart, let end = currentDrawEnd {
                             drawingPreview(from: start, to: end)
                                 .scaleEffect(canvasScale)
@@ -98,15 +92,13 @@ struct FloorPlanEditorView: View {
                     }
                     .clipped()
                     .gesture(canvasGesture(in: geometry))
-                    .gesture(MagnificationGesture()
-                        .onChanged { value in
-                            canvasScale = min(max(value, 0.5), 3.0)
-                        }
+                    .gesture(
+                        MagnificationGesture()
+                            .onChanged { scale in
+                                canvasScale = max(0.5, min(3.0, scale))
+                            }
                     )
                 }
-                
-                // Bottom bar
-                bottomBar
             }
         }
         .navigationTitle(tour.name)
@@ -114,14 +106,14 @@ struct FloorPlanEditorView: View {
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
                 Menu {
-                    Button(action: { showingImagePicker = true }) {
-                        Label("Import Floor Plan", systemImage: "photo")
-                    }
                     Button(action: { showingViewer = true }) {
                         Label("Preview Tour", systemImage: "eye")
                     }
-                    Button(action: saveTour) {
-                        Label("Save", systemImage: "square.and.arrow.down")
+                    Button(action: { showingImagePicker = true }) {
+                        Label("Import Floor Plan", systemImage: "photo")
+                    }
+                    Button(action: { showingCameraConnection = true }) {
+                        Label("Connect Camera", systemImage: "camera")
                     }
                 } label: {
                     Image(systemName: "ellipsis.circle")
@@ -165,9 +157,29 @@ struct FloorPlanEditorView: View {
                         saveTour()
                     },
                     onImportPhoto: {
-                        showingPhotoImporter = true
+                        showingHotspotEditor = false
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                            showingPhotoImporter = true
+                        }
+                    },
+                    onQuickScan: {
+                        showingHotspotEditor = false
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                            showingPanoramaCapture = true
+                        }
                     }
                 )
+            }
+        }
+        .fullScreenCover(isPresented: $showingPanoramaCapture) {
+            PanoramaCaptureView { capturedImage in
+                if let hotspot = selectedHotspot,
+                   let index = hotspots.firstIndex(where: { $0.id == hotspot.id }) {
+                    if let path = savePanoramaImage(capturedImage, for: hotspot) {
+                        hotspots[index].photo360Path = path
+                        saveTour()
+                    }
+                }
             }
         }
         .sheet(isPresented: $showingViewer) {
@@ -194,7 +206,22 @@ struct FloorPlanEditorView: View {
         }
     }
     
-    // MARK: - Toolbar
+    private func savePanoramaImage(_ image: UIImage, for hotspot: Hotspot) -> String? {
+        guard let data = image.jpegData(compressionQuality: 0.8) else { return nil }
+        
+        let fileName = "\(tour.id)_\(hotspot.id)_pano.jpg"
+        let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let filePath = documentsPath.appendingPathComponent(fileName)
+        
+        do {
+            try data.write(to: filePath)
+            return filePath.path
+        } catch {
+            print("Error saving panorama: \(error)")
+            return nil
+        }
+    }
+    
     private var toolbarView: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
@@ -204,50 +231,56 @@ struct FloorPlanEditorView: View {
                 
                 Divider()
                     .frame(height: 30)
-                    .background(Color.sasBorder)
+                    .padding(.horizontal, 8)
                 
-                Button(action: { canvasScale = min(canvasScale * 1.2, 3.0) }) {
-                    Image(systemName: "plus.magnifyingglass")
-                        .foregroundColor(.sasTextSecondary)
-                }
-                
-                Button(action: { canvasScale = max(canvasScale / 1.2, 0.5) }) {
+                Button(action: { canvasScale = max(0.5, canvasScale - 0.25) }) {
                     Image(systemName: "minus.magnifyingglass")
-                        .foregroundColor(.sasTextSecondary)
+                        .foregroundColor(.sasTextPrimary)
+                        .padding(8)
+                        .background(Color.sasCardBg)
+                        .cornerRadius(8)
                 }
                 
-                Button(action: {
-                    canvasScale = 1.0
-                    canvasOffset = .zero
-                }) {
+                Button(action: { canvasScale = min(3.0, canvasScale + 0.25) }) {
+                    Image(systemName: "plus.magnifyingglass")
+                        .foregroundColor(.sasTextPrimary)
+                        .padding(8)
+                        .background(Color.sasCardBg)
+                        .cornerRadius(8)
+                }
+                
+                Button(action: { canvasScale = 1.0; canvasOffset = .zero }) {
                     Image(systemName: "arrow.counterclockwise")
-                        .foregroundColor(.sasTextSecondary)
+                        .foregroundColor(.sasTextPrimary)
+                        .padding(8)
+                        .background(Color.sasCardBg)
+                        .cornerRadius(8)
                 }
             }
-            .padding(.horizontal)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
         }
-        .frame(height: 50)
-        .background(Color.sasCardBg)
+        .background(Color.sasDarkBg)
     }
     
     private func toolButton(_ tool: DrawingTool) -> some View {
         Button(action: { selectedTool = tool }) {
-            VStack(spacing: 4) {
+            HStack(spacing: 4) {
                 Image(systemName: iconForTool(tool))
-                    .font(.system(size: 18))
                 Text(tool.rawValue)
-                    .font(.caption2)
+                    .font(.caption)
             }
-            .foregroundColor(selectedTool == tool ? .sasOrange : .sasTextSecondary)
-            .frame(width: 60, height: 44)
-            .background(selectedTool == tool ? Color.sasOrange.opacity(0.2) : Color.clear)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(selectedTool == tool ? Color.sasOrange : Color.sasCardBg)
+            .foregroundColor(selectedTool == tool ? .white : .sasTextPrimary)
             .cornerRadius(8)
         }
     }
     
     private func iconForTool(_ tool: DrawingTool) -> String {
         switch tool {
-        case .select: return "hand.point.up"
+        case .select: return "arrow.up.left.and.arrow.down.right"
         case .rectangle: return "rectangle"
         case .line: return "line.diagonal"
         case .label: return "textformat"
@@ -255,84 +288,82 @@ struct FloorPlanEditorView: View {
         }
     }
     
-    // MARK: - Canvas Content
     private var canvasContent: some View {
-        Group {
+        ZStack {
+            GridPattern()
+                .stroke(Color.sasBorder.opacity(0.3), lineWidth: 0.5)
+                .frame(width: 2000, height: 2000)
+            
             if let image = floorPlanImage {
                 Image(uiImage: image)
                     .resizable()
                     .aspectRatio(contentMode: .fit)
-            } else {
-                GridPattern()
-                    .stroke(Color.sasBorder.opacity(0.3), lineWidth: 0.5)
+                    .frame(maxWidth: 800, maxHeight: 800)
             }
         }
     }
     
-    // MARK: - Shapes Layer
     private var shapesLayer: some View {
-        ForEach(shapes) { shape in
-            ShapeView(shape: shape)
-        }
-    }
-    
-    // MARK: - Labels Layer
-    private var labelsLayer: some View {
-        ForEach(labels) { label in
-            Text(label.text)
-                .font(.system(size: label.fontSize))
-                .foregroundColor(.sasTextPrimary)
-                .padding(4)
-                .background(Color.sasDarkBg.opacity(0.7))
-                .cornerRadius(4)
-                .position(label.position.cgPoint)
-        }
-    }
-    
-    // MARK: - Hotspots Layer
-    private var hotspotsLayer: some View {
-        ForEach(hotspots) { hotspot in
-            HotspotMarker(
-                hotspot: hotspot,
-                isSelected: selectedHotspot?.id == hotspot.id,
-                isDragging: draggedHotspot?.id == hotspot.id
-            )
-            .position(
-                draggedHotspot?.id == hotspot.id
-                    ? CGPoint(x: hotspot.position.x + dragOffset.width,
-                              y: hotspot.position.y + dragOffset.height)
-                    : hotspot.position.cgPoint
-            )
-            .gesture(
-                DragGesture()
-                    .onChanged { value in
-                        if selectedTool == .select {
-                            draggedHotspot = hotspot
-                            dragOffset = value.translation
-                        }
-                    }
-                    .onEnded { value in
-                        if let index = hotspots.firstIndex(where: { $0.id == hotspot.id }) {
-                            hotspots[index].position = CodablePoint(
-                                x: hotspot.position.x + value.translation.width,
-                                y: hotspot.position.y + value.translation.height
-                            )
-                            saveTour()
-                        }
-                        draggedHotspot = nil
-                        dragOffset = .zero
-                    }
-            )
-            .onTapGesture {
-                selectedHotspot = hotspot
-                if selectedTool == .select {
-                    showingHotspotEditor = true
-                }
+        ZStack {
+            ForEach(shapes) { shape in
+                ShapeView(shape: shape)
             }
         }
     }
     
-    // MARK: - Drawing Preview
+    private var labelsLayer: some View {
+        ZStack {
+            ForEach(labels) { label in
+                Text(label.text)
+                    .font(.caption)
+                    .padding(4)
+                    .background(Color.sasCardBg.opacity(0.8))
+                    .cornerRadius(4)
+                    .foregroundColor(.sasTextPrimary)
+                    .position(label.position.cgPoint)
+            }
+        }
+    }
+    
+    private var hotspotsLayer: some View {
+        ZStack {
+            ForEach(hotspots) { hotspot in
+                HotspotMarker(
+                    hotspot: hotspot,
+                    isSelected: selectedHotspot?.id == hotspot.id,
+                    onTap: {
+                        selectedHotspot = hotspot
+                        showingHotspotEditor = true
+                    }
+                )
+                .position(hotspot.position.cgPoint)
+                .offset(draggedHotspot?.id == hotspot.id ? dragOffset : .zero)
+                .gesture(
+                    DragGesture()
+                        .onChanged { value in
+                            if selectedTool == .select {
+                                draggedHotspot = hotspot
+                                dragOffset = value.translation
+                            }
+                        }
+                        .onEnded { value in
+                            if let dragged = draggedHotspot,
+                               let index = hotspots.firstIndex(where: { $0.id == dragged.id }) {
+                                let newPos = CGPoint(
+                                    x: dragged.position.x + Double(value.translation.width / canvasScale),
+                                    y: dragged.position.y + Double(value.translation.height / canvasScale)
+                                )
+                                hotspots[index].position = CodablePoint(newPos)
+                                saveTour()
+                            }
+                            draggedHotspot = nil
+                            dragOffset = .zero
+                        }
+                )
+            }
+        }
+    }
+    
     private func drawingPreview(from start: CGPoint, to end: CGPoint) -> some View {
         Group {
             switch selectedTool {
@@ -353,20 +384,20 @@ struct FloorPlanEditorView: View {
         }
     }
     
-    // MARK: - Canvas Gesture
     private func canvasGesture(in geometry: GeometryProxy) -> some Gesture {
         DragGesture(minimumDistance: 0)
             .onChanged { value in
-                let location = adjustedLocation(value.location, in: geometry)
+                let location = CGPoint(
+                    x: (value.location.x - canvasOffset.width) / canvasScale,
+                    y: (value.location.y - canvasOffset.height) / canvasScale
+                )
                 
                 switch selectedTool {
                 case .select:
-                    if draggedHotspot == nil {
-                        canvasOffset = CGSize(
-                            width: canvasOffset.width + value.translation.width * 0.1,
-                            height: canvasOffset.height + value.translation.height * 0.1
-                        )
-                    }
+                    canvasOffset = CGSize(
+                        width: canvasOffset.width + value.translation.width * 0.1,
+                        height: canvasOffset.height + value.translation.height * 0.1
+                    )
                 case .rectangle, .line:
                     if currentDrawStart == nil {
                         currentDrawStart = location
@@ -377,7 +408,10 @@ struct FloorPlanEditorView: View {
                 }
             }
             .onEnded { value in
-                let location = adjustedLocation(value.location, in: geometry)
+                let location = CGPoint(
+                    x: (value.location.x - canvasOffset.width) / canvasScale,
+                    y: (value.location.y - canvasOffset.height) / canvasScale
+                )
                 
                 switch selectedTool {
                 case .select:
@@ -412,6 +446,7 @@ struct FloorPlanEditorView: View {
                     )
                     hotspots.append(hotspot)
                     selectedHotspot = hotspot
+                    showingHotspotEditor = true
                     saveTour()
                 }
                 
@@ -420,77 +455,28 @@ struct FloorPlanEditorView: View {
             }
     }
     
-    private func adjustedLocation(_ location: CGPoint, in geometry: GeometryProxy) -> CGPoint {
-        let centerX = geometry.size.width / 2
-        let centerY = geometry.size.height / 2
-        return CGPoint(
-            x: (location.x - centerX - canvasOffset.width) / canvasScale + centerX,
-            y: (location.y - centerY - canvasOffset.height) / canvasScale + centerY
-        )
-    }
-    
-    // MARK: - Bottom Bar
-    private var bottomBar: some View {
-        HStack {
-            HStack(spacing: 8) {
-                Image(systemName: "mappin.circle.fill")
-                    .foregroundColor(.sasOrange)
-                Text("\(hotspots.count) hotspots")
-                    .font(.subheadline)
-                    .foregroundColor(.sasTextSecondary)
-            }
-            
-            Spacer()
-            
-            HStack(spacing: 12) {
-                Button(action: { showingCameraConnection = true }) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "camera")
-                        Text("Camera")
-                    }
-                    .font(.subheadline)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(Color.sasBlue)
-                    .foregroundColor(.white)
-                    .cornerRadius(8)
-                }
-                
-                Button(action: { showingViewer = true }) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "eye")
-                        Text("Preview")
-                    }
-                    .font(.subheadline)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(Color.sasOrange)
-                    .foregroundColor(.white)
-                    .cornerRadius(8)
-                }
-            }
-        }
-        .padding()
-        .background(Color.sasCardBg)
-    }
-    
-    // MARK: - Data Operations
     private func loadTourData() {
-        hotspots = tour.hotspots
+        // Load from floorPlanDrawing if it exists
         if let drawing = tour.floorPlanDrawing {
             shapes = drawing.shapes
             labels = drawing.labels
         }
-        if let path = tour.floorPlanImagePath {
-            floorPlanImage = UIImage(contentsOfFile: path)
+        hotspots = tour.hotspots
+        
+        if let imagePath = tour.floorPlanImagePath {
+            floorPlanImage = UIImage(contentsOfFile: imagePath)
         }
     }
     
     private func saveTour() {
+        // Save shapes and labels to floorPlanDrawing
+        var drawing = tour.floorPlanDrawing ?? FloorPlanDrawing()
+        drawing.shapes = shapes
+        drawing.labels = labels
+        tour.floorPlanDrawing = drawing
         tour.hotspots = hotspots
-        tour.floorPlanDrawing = FloorPlanDrawing(shapes: shapes, labels: labels)
-        tour.lastModifiedAt = Date()
         
+        // Use correct updateTour signature based on assignment
         if tour.isAssigned, let customer = customer, let facility = facility, let project = project {
             dataManager.updateTour(tour, in: project, in: facility, in: customer)
         } else {
@@ -501,44 +487,59 @@ struct FloorPlanEditorView: View {
     private func loadFloorPlanImage(from item: PhotosPickerItem?) {
         guard let item = item else { return }
         
-        Task {
-            if let data = try? await item.loadTransferable(type: Data.self),
-               let image = UIImage(data: data) {
-                await MainActor.run {
-                    floorPlanImage = image
-                    if let path = dataManager.saveImage(image, for: tour.id) {
-                        tour.floorPlanImagePath = path
-                        saveTour()
+        item.loadTransferable(type: Data.self) { result in
+            DispatchQueue.main.async {
+                switch result {
+                case .success(let data):
+                    if let data = data, let image = UIImage(data: data) {
+                        self.floorPlanImage = image
+                        self.saveFloorPlanImage(image)
                     }
+                case .failure(let error):
+                    print("Error loading image: \(error)")
                 }
             }
         }
     }
+    
+    private func saveFloorPlanImage(_ image: UIImage) {
+        guard let data = image.jpegData(compressionQuality: 0.8) else { return }
+        
+        let fileName = "\(tour.id)_floorplan.jpg"
+        let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let filePath = documentsPath.appendingPathComponent(fileName)
+        
+        do {
+            try data.write(to: filePath)
+            tour.floorPlanImagePath = filePath.path
+            saveTour()
+        } catch {
+            print("Error saving floor plan: \(error)")
+        }
+    }
 }
 
-// MARK: - Grid Pattern
+// MARK: - Supporting Views
+
 struct GridPattern: Shape {
-    let spacing: CGFloat = 20
-    
     func path(in rect: CGRect) -> Path {
         var path = Path()
-        var x: CGFloat = 0
-        while x <= rect.width {
+        let gridSize: CGFloat = 50
+        
+        for x in stride(from: 0, through: rect.width, by: gridSize) {
             path.move(to: CGPoint(x: x, y: 0))
             path.addLine(to: CGPoint(x: x, y: rect.height))
-            x += spacing
         }
-        var y: CGFloat = 0
-        while y <= rect.height {
+        
+        for y in stride(from: 0, through: rect.height, by: gridSize) {
             path.move(to: CGPoint(x: 0, y: y))
             path.addLine(to: CGPoint(x: rect.width, y: y))
-            y += spacing
         }
+        
         return path
     }
 }
 
-// MARK: - Shape View
 struct ShapeView: View {
     let shape: DrawingShape
     
@@ -546,7 +547,7 @@ struct ShapeView: View {
         switch shape.type {
         case .rectangle:
             Rectangle()
-                .stroke(Color.sasBlue, lineWidth: shape.strokeWidth)
+                .stroke(Color.sasBlue, lineWidth: 2)
                 .frame(
                     width: abs(shape.endPoint.x - shape.startPoint.x),
                     height: abs(shape.endPoint.y - shape.startPoint.y)
@@ -560,38 +561,40 @@ struct ShapeView: View {
                 path.move(to: shape.startPoint.cgPoint)
                 path.addLine(to: shape.endPoint.cgPoint)
             }
-            .stroke(Color.sasBlue, lineWidth: shape.strokeWidth)
+            .stroke(Color.sasBlue, lineWidth: 2)
         case .polygon, .arc:
+            // Placeholder for future shape types
             EmptyView()
         }
     }
 }
 
-// MARK: - Hotspot Marker
 struct HotspotMarker: View {
     let hotspot: Hotspot
     let isSelected: Bool
-    let isDragging: Bool
-    
-    var hasPhoto: Bool { hotspot.photo360Path != nil }
+    var onTap: () -> Void
     
     var body: some View {
-        ZStack {
-            Circle()
-                .stroke(isSelected ? Color.sasOrange : (hasPhoto ? Color.sasSuccess : Color.sasBlue), lineWidth: 3)
-                .frame(width: 36, height: 36)
+        VStack(spacing: 2) {
+            ZStack {
+                Circle()
+                    .fill(hotspot.photo360Path != nil ? Color.sasSuccess : Color.sasOrange)
+                    .frame(width: isSelected ? 40 : 32, height: isSelected ? 40 : 32)
+                
+                Image(systemName: hotspot.photo360Path != nil ? "checkmark" : "camera")
+                    .font(.system(size: isSelected ? 18 : 14))
+                    .foregroundColor(.white)
+            }
             
-            Circle()
-                .fill(isSelected ? Color.sasOrange.opacity(0.3) : (hasPhoto ? Color.sasSuccess.opacity(0.2) : Color.sasBlue.opacity(0.2)))
-                .frame(width: 30, height: 30)
-            
-            Image(systemName: hasPhoto ? "camera.fill" : "plus")
-                .font(.system(size: 14, weight: .bold))
-                .foregroundColor(isSelected ? .sasOrange : (hasPhoto ? .sasSuccess : .sasBlue))
+            Text(hotspot.name)
+                .font(.caption2)
+                .foregroundColor(.sasTextPrimary)
+                .padding(.horizontal, 4)
+                .padding(.vertical, 2)
+                .background(Color.sasCardBg.opacity(0.9))
+                .cornerRadius(4)
         }
-        .shadow(color: .black.opacity(0.3), radius: isDragging ? 8 : 4)
-        .scaleEffect(isDragging ? 1.2 : 1.0)
-        .animation(.easeInOut(duration: 0.15), value: isDragging)
+        .onTapGesture(perform: onTap)
     }
 }
 
@@ -603,6 +606,7 @@ struct HotspotEditorSheet: View {
     var onSave: (Hotspot) -> Void
     var onDelete: () -> Void
     var onImportPhoto: () -> Void
+    var onQuickScan: () -> Void
     
     var body: some View {
         NavigationStack {
@@ -625,7 +629,7 @@ struct HotspotEditorSheet: View {
                                 .foregroundColor(.sasTextPrimary)
                         }
                         
-                        // 360 Photo
+                        // 360 Photo Section
                         VStack(alignment: .leading, spacing: 8) {
                             Text("360° Photo")
                                 .font(.subheadline)
@@ -639,25 +643,64 @@ struct HotspotEditorSheet: View {
                                     .frame(height: 150)
                                     .clipShape(RoundedRectangle(cornerRadius: 10))
                                 
-                                Button(action: onImportPhoto) {
-                                    Text("Replace Photo")
+                                HStack(spacing: 12) {
+                                    Button(action: onQuickScan) {
+                                        HStack {
+                                            Image(systemName: "camera.viewfinder")
+                                            Text("Quick Scan")
+                                        }
                                         .font(.subheadline)
                                         .foregroundColor(.sasOrange)
+                                    }
+                                    
+                                    Divider().frame(height: 20)
+                                    
+                                    Button(action: onImportPhoto) {
+                                        HStack {
+                                            Image(systemName: "photo")
+                                            Text("Import")
+                                        }
+                                        .font(.subheadline)
+                                        .foregroundColor(.sasBlue)
+                                    }
                                 }
                             } else {
-                                Button(action: onImportPhoto) {
-                                    VStack(spacing: 12) {
-                                        Image(systemName: "photo.badge.plus")
-                                            .font(.system(size: 40))
-                                            .foregroundColor(.sasBlue)
-                                        Text("Import 360° Photo")
-                                            .font(.subheadline)
-                                            .foregroundColor(.sasTextSecondary)
+                                VStack(spacing: 12) {
+                                    Button(action: onQuickScan) {
+                                        VStack(spacing: 8) {
+                                            Image(systemName: "camera.viewfinder")
+                                                .font(.system(size: 36))
+                                                .foregroundColor(.sasOrange)
+                                            Text("Quick Scan")
+                                                .font(.headline)
+                                                .foregroundColor(.sasTextPrimary)
+                                            Text("Capture 360° panorama with your phone")
+                                                .font(.caption)
+                                                .foregroundColor(.sasTextSecondary)
+                                        }
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 20)
+                                        .background(Color.sasCardBg)
+                                        .cornerRadius(10)
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 10)
+                                                .stroke(Color.sasOrange, lineWidth: 2)
+                                        )
                                     }
-                                    .frame(maxWidth: .infinity)
-                                    .frame(height: 120)
-                                    .background(Color.sasCardBg)
-                                    .cornerRadius(10)
+                                    
+                                    Button(action: onImportPhoto) {
+                                        HStack {
+                                            Image(systemName: "photo.badge.plus")
+                                                .font(.system(size: 20))
+                                            Text("Import from Library")
+                                                .font(.subheadline)
+                                        }
+                                        .foregroundColor(.sasBlue)
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 14)
+                                        .background(Color.sasCardBg)
+                                        .cornerRadius(10)
+                                    }
                                 }
                             }
                         }
@@ -720,9 +763,8 @@ struct HotspotEditorSheet: View {
                             .cornerRadius(10)
                         }
                     }
-                    .padding(.horizontal, 20)
+                    .padding(.horizontal, 16)
                     .padding(.top, 16)
-                    .safeAreaPadding(.horizontal)
                 }
             }
             .navigationTitle("Edit Hotspot")

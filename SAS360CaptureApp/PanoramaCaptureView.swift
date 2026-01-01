@@ -2,51 +2,49 @@
 //  PanoramaCaptureView.swift
 //  SAS360Capture
 //
-//  iPhone-based panorama capture with rotation guide
+//  Matterport-style panorama capture using ARKit for stable world-anchored dots
 //
 
 import SwiftUI
-import AVFoundation
-import CoreMotion
+import ARKit
+import SceneKit
 import Combine
 
 struct PanoramaCaptureView: View {
     @Environment(\.dismiss) var dismiss
-    @StateObject private var captureManager = PanoramaCaptureManager()
+    @StateObject private var captureManager = ARPanoramaCaptureManager()
     
     var onComplete: (UIImage) -> Void
     
     var body: some View {
         ZStack {
-            // Camera preview
-            CameraPreview(captureManager: captureManager)
+            // AR View with camera and overlaid dots
+            ARPanoramaViewContainer(captureManager: captureManager)
                 .ignoresSafeArea()
             
+            // Dotted line from center to next target (2D overlay)
+            if let targetScreenPos = captureManager.nextTargetScreenPosition {
+                DottedLineOverlay(targetPosition: targetScreenPos)
+            }
+            
+            // Center reticle (SwiftUI overlay - always centered)
+            ReticleOverlay(
+                isSettling: captureManager.isSettling,
+                isCapturing: captureManager.isCapturing,
+                progress: captureManager.captureProgress
+            )
+            
+            // Top bar
             VStack {
-                // Top bar
                 topBar
-                
                 Spacer()
-                
-                // Rotation guide wheel
-                if captureManager.isMotionActive {
-                    RotationGuideView(
-                        currentAngle: captureManager.currentYaw,
-                        capturedAngles: captureManager.capturedAngles,
-                        targetCount: 8,
-                        isAligned: captureManager.isAlignedWithTarget
-                    )
-                    .frame(width: 220, height: 220)
-                    .padding(.bottom, 20)
-                }
-                
-                // Instructions
+            }
+            
+            // Instructions at bottom
+            VStack {
+                Spacer()
                 instructionsView
-                    .padding(.bottom, 20)
-                
-                // Capture button
-                captureButton
-                    .padding(.bottom, 50)
+                    .padding(.bottom, 60)
             }
             
             // Processing overlay
@@ -56,11 +54,9 @@ struct PanoramaCaptureView: View {
         }
         .onAppear {
             captureManager.startSession()
-            captureManager.startMotionUpdates()
         }
         .onDisappear {
-            captureManager.stopSession()
-            captureManager.stopMotionUpdates()
+            captureManager.pauseSession()
         }
         .onChange(of: captureManager.completedImage) { _, image in
             if let image = image {
@@ -88,116 +84,86 @@ struct PanoramaCaptureView: View {
             
             Spacer()
             
-            Text("\(captureManager.capturedCount) / 8")
-                .font(.headline)
-                .foregroundColor(.white)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 8)
-                .background(Color.black.opacity(0.6))
-                .cornerRadius(20)
+            // Pass indicator
+            VStack(spacing: 2) {
+                Text(captureManager.currentPass == .level ? "Level Pass" : "Tilt Up 30°")
+                    .font(.caption)
+                    .foregroundColor(.gray)
+                Text("\(captureManager.currentPassCaptured) / \(captureManager.photosPerPass)")
+                    .font(.headline)
+                    .foregroundColor(.white)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            .background(Color.black.opacity(0.6))
+            .cornerRadius(12)
             
             Spacer()
             
-            if captureManager.capturedCount >= 2 {
-                Button(action: { captureManager.createPanorama() }) {
-                    Text("Done")
-                        .font(.headline)
-                        .foregroundColor(.sasOrange)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 8)
-                        .background(Color.black.opacity(0.6))
-                        .cornerRadius(20)
+            // Undo button
+            Button(action: { captureManager.undoLastCapture() }) {
+                HStack(spacing: 4) {
+                    Image(systemName: "arrow.uturn.backward")
+                    Text("Undo")
+                        .font(.caption)
                 }
-            } else {
-                Color.clear.frame(width: 70, height: 44)
+                .font(.title3)
+                .foregroundColor(.white)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(Color.black.opacity(0.6))
+                .cornerRadius(20)
             }
+            .opacity(captureManager.capturedCount > 0 ? 1 : 0.3)
+            .disabled(captureManager.capturedCount == 0)
         }
         .padding()
     }
     
     private var instructionsView: some View {
         VStack(spacing: 8) {
-            if captureManager.capturedCount == 0 {
-                Text("Align circle with green dot")
-                    .font(.subheadline)
+            if !captureManager.isARReady {
+                Text("Initializing AR...")
+                    .font(.headline)
+                    .foregroundColor(.sasOrange)
+                Text("Move phone slowly to scan environment")
+                    .font(.caption)
                     .foregroundColor(.white)
-                Text("Then tap to capture")
+            } else if captureManager.currentPass == .tiltedUp && captureManager.currentPassCaptured == 0 {
+                Text("Tilt phone up ~30°")
+                    .font(.headline)
+                    .foregroundColor(.sasOrange)
+                Text("Then aim at the next dot")
+                    .font(.caption)
+                    .foregroundColor(.white)
+            } else if captureManager.isSettling {
+                Text("Hold steady...")
+                    .font(.headline)
+                    .foregroundColor(.sasOrange)
+            } else if captureManager.isCapturing {
+                Text("Capturing...")
+                    .font(.headline)
+                    .foregroundColor(.sasSuccess)
+            } else {
+                Text("Aim at next dot")
+                    .font(.headline)
+                    .foregroundColor(.white)
+                Text("Hold steady to capture")
                     .font(.caption)
                     .foregroundColor(.gray)
-            } else if captureManager.capturedCount < 8 {
-                Text("Rotate and tap to capture")
-                    .font(.subheadline)
-                    .foregroundColor(.white)
-                Text("\(8 - captureManager.capturedCount) more needed")
-                    .font(.caption)
-                    .foregroundColor(.sasOrange)
-            } else {
-                Text("✅ Tap Done to create panorama")
-                    .font(.subheadline)
-                    .foregroundColor(.sasSuccess)
             }
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 12)
-        .background(Color.black.opacity(0.6))
-        .cornerRadius(12)
-    }
-    
-    private var captureButton: some View {
-        HStack(spacing: 60) {
-            // Reset
-            Button(action: { captureManager.reset() }) {
-                VStack(spacing: 4) {
-                    Image(systemName: "arrow.counterclockwise")
-                        .font(.title2)
-                    Text("Reset")
-                        .font(.caption)
-                }
-                .foregroundColor(.white)
-                .frame(width: 60)
-            }
-            .opacity(captureManager.capturedCount > 0 ? 1 : 0.3)
-            .disabled(captureManager.capturedCount == 0)
-            
-            // Capture - only enabled when aligned
-            Button(action: { captureManager.capturePhoto() }) {
-                ZStack {
-                    Circle()
-                        .stroke(captureManager.canCapture ? Color.white : Color.gray, lineWidth: 5)
-                        .frame(width: 85, height: 85)
-                    
-                    Circle()
-                        .fill(captureManager.canCapture ? Color.white : Color.gray.opacity(0.5))
-                        .frame(width: 70, height: 70)
-                    
-                    Image(systemName: "camera.fill")
-                        .font(.title)
-                        .foregroundColor(captureManager.canCapture ? .black : .gray)
-                }
-            }
-            .disabled(!captureManager.canCapture)
-            
-            // Create
-            Button(action: { captureManager.createPanorama() }) {
-                VStack(spacing: 4) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.title2)
-                    Text("Create")
-                        .font(.caption)
-                }
-                .foregroundColor(captureManager.capturedCount >= 2 ? .sasSuccess : .gray)
-                .frame(width: 60)
-            }
-            .opacity(captureManager.capturedCount >= 2 ? 1 : 0.3)
-            .disabled(captureManager.capturedCount < 2)
-        }
+        .padding(.horizontal, 24)
+        .padding(.vertical, 14)
+        .background(Color.black.opacity(0.7))
+        .cornerRadius(16)
     }
     
     private var processingOverlay: some View {
         ZStack {
-            Color.black.opacity(0.8).ignoresSafeArea()
+            Color.black.opacity(0.85).ignoresSafeArea()
             
-            VStack(spacing: 20) {
+            VStack(spacing: 24) {
                 ProgressView()
                     .progressViewStyle(CircularProgressViewStyle(tint: .sasOrange))
                     .scaleEffect(2)
@@ -205,231 +171,545 @@ struct PanoramaCaptureView: View {
                 Text("Creating panorama...")
                     .font(.headline)
                     .foregroundColor(.white)
+                
+                Text("This may take a moment")
+                    .font(.caption)
+                    .foregroundColor(.gray)
             }
         }
     }
 }
 
-// MARK: - Rotation Guide View
-struct RotationGuideView: View {
-    let currentAngle: Double
-    let capturedAngles: [Double]
-    let targetCount: Int
-    let isAligned: Bool
+// MARK: - Dotted Line Overlay
+struct DottedLineOverlay: View {
+    let targetPosition: CGPoint
     
-    private let alignmentCircleSize: CGFloat = 40
+    var body: some View {
+        GeometryReader { geometry in
+            let center = CGPoint(x: geometry.size.width / 2, y: geometry.size.height / 2)
+            
+            // Only draw if target is not at center (i.e., not already aligned)
+            let distance = hypot(targetPosition.x - center.x, targetPosition.y - center.y)
+            
+            if distance > 50 {
+                Path { path in
+                    path.move(to: center)
+                    path.addLine(to: targetPosition)
+                }
+                .stroke(style: StrokeStyle(lineWidth: 2, dash: [8, 8]))
+                .foregroundColor(Color.white.opacity(0.8))
+            }
+        }
+    }
+}
+
+// MARK: - Reticle Overlay (SwiftUI)
+struct ReticleOverlay: View {
+    let isSettling: Bool
+    let isCapturing: Bool
+    let progress: Double
+    
+    var color: Color {
+        if isCapturing { return .sasSuccess }
+        if isSettling { return .sasOrange }
+        return .white
+    }
     
     var body: some View {
         ZStack {
-            // Outer circle
-            Circle()
-                .stroke(Color.white.opacity(0.3), lineWidth: 2)
-            
-            // Target markers (8 positions) - green dots
-            ForEach(0..<targetCount, id: \.self) { index in
-                let angle = Double(index) * (360.0 / Double(targetCount))
-                let isCaptured = isAngleCaptured(angle)
-                
+            // Progress ring
+            if progress > 0 {
                 Circle()
-                    .fill(isCaptured ? Color.sasSuccess : Color.sasSuccess.opacity(0.6))
-                    .frame(width: 14, height: 14)
-                    .offset(y: -95)
-                    .rotationEffect(.degrees(angle))
+                    .trim(from: 0, to: progress)
+                    .stroke(Color.sasOrange, style: StrokeStyle(lineWidth: 4, lineCap: .round))
+                    .frame(width: 80, height: 80)
+                    .rotationEffect(.degrees(-90))
             }
             
-            // Alignment circle - moves with current position
+            // Outer ring
             Circle()
-                .stroke(isAligned ? Color.sasSuccess : Color.white.opacity(0.8), lineWidth: 3)
-                .frame(width: alignmentCircleSize, height: alignmentCircleSize)
-                .offset(y: -95)
-                .rotationEffect(.degrees(currentAngle))
+                .stroke(color, lineWidth: 3)
+                .frame(width: 70, height: 70)
             
-            // Degree display
-            Text("\(Int(currentAngle))°")
-                .font(.subheadline)
-                .fontWeight(.semibold)
-                .foregroundColor(.white)
-                .offset(y: 30)
+            // Crosshairs
+            Rectangle()
+                .fill(color)
+                .frame(width: 24, height: 2)
+            Rectangle()
+                .fill(color)
+                .frame(width: 2, height: 24)
         }
-    }
-    
-    private func isAngleCaptured(_ targetAngle: Double) -> Bool {
-        for captured in capturedAngles {
-            let diff = abs(captured - targetAngle)
-            if diff < 25 || diff > 335 {
-                return true
-            }
-        }
-        return false
+        .opacity(0.9)
     }
 }
 
-// MARK: - Camera Preview
-struct CameraPreview: UIViewRepresentable {
-    @ObservedObject var captureManager: PanoramaCaptureManager
+// MARK: - AR View Container
+struct ARPanoramaViewContainer: UIViewRepresentable {
+    @ObservedObject var captureManager: ARPanoramaCaptureManager
     
-    func makeUIView(context: Context) -> PreviewView {
-        let view = PreviewView()
-        view.previewLayer.session = captureManager.session
-        view.previewLayer.videoGravity = .resizeAspectFill
-        return view
+    func makeUIView(context: Context) -> ARSCNView {
+        let arView = ARSCNView()
+        arView.delegate = context.coordinator
+        arView.session.delegate = context.coordinator
+        arView.automaticallyUpdatesLighting = true
+        arView.rendersContinuously = true
+        
+        captureManager.arView = arView
+        
+        return arView
     }
     
-    func updateUIView(_ uiView: PreviewView, context: Context) {}
+    func updateUIView(_ uiView: ARSCNView, context: Context) {}
     
-    class PreviewView: UIView {
-        override class var layerClass: AnyClass {
-            AVCaptureVideoPreviewLayer.self
+    func makeCoordinator() -> Coordinator {
+        Coordinator(captureManager: captureManager)
+    }
+    
+    class Coordinator: NSObject, ARSCNViewDelegate, ARSessionDelegate {
+        let captureManager: ARPanoramaCaptureManager
+        
+        init(captureManager: ARPanoramaCaptureManager) {
+            self.captureManager = captureManager
         }
         
-        var previewLayer: AVCaptureVideoPreviewLayer {
-            layer as! AVCaptureVideoPreviewLayer
+        func session(_ session: ARSession, didUpdate frame: ARFrame) {
+            captureManager.processFrame(frame)
+        }
+        
+        func session(_ session: ARSession, cameraDidChangeTrackingState camera: ARCamera) {
+            DispatchQueue.main.async {
+                switch camera.trackingState {
+                case .normal:
+                    self.captureManager.isARReady = true
+                default:
+                    break
+                }
+            }
         }
     }
 }
 
-// MARK: - Panorama Capture Manager
-class PanoramaCaptureManager: NSObject, ObservableObject {
+// MARK: - Capture Pass Enum
+enum ARCapturePass {
+    case level
+    case tiltedUp
+}
+
+// MARK: - Target Info
+class ARTargetInfo {
+    var node: SCNNode
+    var isCaptured: Bool = false
+    let worldPosition: SIMD3<Float>
+    
+    init(node: SCNNode, worldPosition: SIMD3<Float>) {
+        self.node = node
+        self.worldPosition = worldPosition
+    }
+}
+
+// MARK: - AR Panorama Capture Manager
+class ARPanoramaCaptureManager: ObservableObject {
+    // Published state
     @Published var capturedCount = 0
-    @Published var capturedAngles: [Double] = []
-    @Published var currentYaw: Double = 0
     @Published var isProcessing = false
-    @Published var isMotionActive = false
     @Published var completedImage: UIImage?
     @Published var showError = false
     @Published var errorMessage = ""
-    @Published var isAlignedWithTarget = false
+    @Published var captureProgress: Double = 0
+    @Published var isSettling = false
+    @Published var isCapturing = false
+    @Published var currentPass: ARCapturePass = .level
+    @Published var isARReady = false
+    @Published var nextTargetScreenPosition: CGPoint?
     
-    var canCapture: Bool {
-        if capturedCount == 0 {
-            return isAlignedWithTarget
-        }
-        return isAlignedWithTarget && !isCurrentPositionCaptured()
-    }
+    // AR View reference
+    weak var arView: ARSCNView?
     
-    let session = AVCaptureSession()
-    private var photoOutput = AVCapturePhotoOutput()
-    private let motionManager = CMMotionManager()
+    // Targets
+    let photosPerPass = 7
+    private var levelTargets: [ARTargetInfo] = []
+    private var tiltedTargets: [ARTargetInfo] = []
+    private var hasPlacedTargets = false
+    
+    // Captured data
     private var capturedImageData: [Data] = []
-    private var referenceYaw: Double?
+    private var capturedAngles: [(yaw: Float, pitch: Float)] = []
     
-    private let targetAngles: [Double] = [0, 45, 90, 135, 180, 225, 270, 315]
-    private let alignmentThreshold: Double = 15.0
+    // Alignment tracking
+    private var settleStartTime: Date?
+    private var captureStartTime: Date?
+    private let settlingDuration: TimeInterval = 0.5
+    private let captureDuration: TimeInterval = 1.0
+    private let alignmentThreshold: Float = 0.12  // Radians (~7 degrees)
     
-    override init() {
-        super.init()
-        setupSession()
+    // Distance to place dots (in meters)
+    private let dotDistance: Float = 2.5
+    
+    var currentPassTargets: [ARTargetInfo] {
+        currentPass == .level ? levelTargets : tiltedTargets
     }
     
-    private func setupSession() {
-        session.beginConfiguration()
-        session.sessionPreset = .high
-        
-        guard let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) else {
-            print("No camera available")
-            session.commitConfiguration()
-            return
-        }
-        
-        do {
-            let input = try AVCaptureDeviceInput(device: camera)
-            if session.canAddInput(input) {
-                session.addInput(input)
-            }
-        } catch {
-            print("Camera input error: \(error)")
-            session.commitConfiguration()
-            return
-        }
-        
-        if session.canAddOutput(photoOutput) {
-            session.addOutput(photoOutput)
-        }
-        
-        session.commitConfiguration()
+    var currentPassCaptured: Int {
+        currentPassTargets.filter { $0.isCaptured }.count
     }
     
+    var nextTargetIndex: Int? {
+        currentPassTargets.firstIndex(where: { !$0.isCaptured })
+    }
+    
+    // MARK: - Session Control
     func startSession() {
-        guard !session.isRunning else { return }
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            self?.session.startRunning()
-        }
-    }
-    
-    func stopSession() {
-        guard session.isRunning else { return }
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            self?.session.stopRunning()
-        }
-    }
-    
-    // WORKING MOTION CODE FROM YESTERDAY - DO NOT CHANGE
-    func startMotionUpdates() {
-        guard motionManager.isDeviceMotionAvailable else { return }
+        guard let arView = arView else { return }
         
-        motionManager.deviceMotionUpdateInterval = 0.05
-        motionManager.startDeviceMotionUpdates(using: .xArbitraryZVertical, to: .main) { [weak self] motion, error in
-            guard let self = self, let motion = motion else { return }
+        let configuration = ARWorldTrackingConfiguration()
+        configuration.worldAlignment = .gravity
+        configuration.isAutoFocusEnabled = true
+        
+        // Select a video format without aggressive cropping
+        // Look for 1920x1440 or similar 4:3 format which uses more of the sensor
+        let supportedFormats = ARWorldTrackingConfiguration.supportedVideoFormats
+        if let preferredFormat = supportedFormats.first(where: { format in
+            // 4:3 formats use more of the sensor = wider effective FOV
+            let ratio = format.imageResolution.width / format.imageResolution.height
+            return ratio < 1.5 // 4:3 = 1.33, 16:9 = 1.78
+        }) {
+            configuration.videoFormat = preferredFormat
+        }
+        
+        arView.session.run(configuration, options: [.resetTracking, .removeExistingAnchors])
+        hasPlacedTargets = false
+        isARReady = false
+    }
+    
+    func pauseSession() {
+        arView?.session.pause()
+    }
+    
+    // MARK: - Frame Processing
+    func processFrame(_ frame: ARFrame) {
+        // Wait for good tracking before placing targets
+        if !hasPlacedTargets && frame.camera.trackingState == .normal {
+            placeTargetsInWorld(from: frame)
+            hasPlacedTargets = true
+        }
+        
+        guard hasPlacedTargets else { return }
+        
+        // Update visual appearance of targets
+        updateTargetVisuals(frame: frame)
+        
+        // Update next target screen position for dotted line
+        updateNextTargetScreenPosition(frame: frame)
+        
+        // Check if we're aligned with next target
+        checkAlignment(frame: frame)
+    }
+    
+    private func placeTargetsInWorld(from frame: ARFrame) {
+        guard let arView = arView else { return }
+        
+        let cameraTransform = frame.camera.transform
+        let cameraPos = SIMD3<Float>(cameraTransform.columns.3.x, cameraTransform.columns.3.y, cameraTransform.columns.3.z)
+        
+        // Get initial forward direction (horizontal only)
+        let forward = -SIMD3<Float>(cameraTransform.columns.2.x, cameraTransform.columns.2.y, cameraTransform.columns.2.z)
+        let horizontalForward = normalize(SIMD3<Float>(forward.x, 0, forward.z))
+        let initialYaw = atan2(horizontalForward.x, horizontalForward.z)
+        
+        let angleStep = Float.pi * 2 / Float(photosPerPass)
+        
+        // Create level targets (around horizon) - CLOCKWISE (negative angle)
+        for i in 0..<photosPerPass {
+            let yaw = initialYaw - Float(i) * angleStep  // Negative for clockwise
             
-            self.isMotionActive = true
+            let x = cameraPos.x + dotDistance * sin(yaw)
+            let y = cameraPos.y  // Same height as camera
+            let z = cameraPos.z + dotDistance * cos(yaw)
             
-            // Negative sign for correct direction (rotate right = clockwise on screen)
-            var yaw = -motion.attitude.yaw * 180 / .pi
+            let worldPos = SIMD3<Float>(x, y, z)
+            let node = createTargetNode()
+            node.position = SCNVector3(x, y, z)
+            node.look(at: SCNVector3(cameraPos.x, cameraPos.y, cameraPos.z))
             
-            // Set reference on first reading
-            if self.referenceYaw == nil {
-                self.referenceYaw = yaw
+            arView.scene.rootNode.addChildNode(node)
+            levelTargets.append(ARTargetInfo(node: node, worldPosition: worldPos))
+        }
+        
+        // Create tilted targets (25° up, offset by half step) - CLOCKWISE
+        let tiltAngle: Float = 25 * .pi / 180
+        for i in 0..<photosPerPass {
+            let yaw = initialYaw - Float(i) * angleStep - (angleStep / 2)  // Negative for clockwise
+            
+            let horizontalDist = dotDistance * cos(tiltAngle)
+            let x = cameraPos.x + horizontalDist * sin(yaw)
+            let y = cameraPos.y + dotDistance * sin(tiltAngle)
+            let z = cameraPos.z + horizontalDist * cos(yaw)
+            
+            let worldPos = SIMD3<Float>(x, y, z)
+            let node = createTargetNode()
+            node.position = SCNVector3(x, y, z)
+            node.look(at: SCNVector3(cameraPos.x, cameraPos.y, cameraPos.z))
+            node.isHidden = true  // Hide until level pass done
+            
+            arView.scene.rootNode.addChildNode(node)
+            tiltedTargets.append(ARTargetInfo(node: node, worldPosition: worldPos))
+        }
+    }
+    
+    private func createTargetNode() -> SCNNode {
+        let node = SCNNode()
+        
+        // Main ring
+        let ringGeometry = SCNTorus(ringRadius: 0.08, pipeRadius: 0.012)
+        let ringMaterial = SCNMaterial()
+        ringMaterial.diffuse.contents = UIColor.white
+        ringMaterial.emission.contents = UIColor.white.withAlphaComponent(0.5)
+        ringGeometry.materials = [ringMaterial]
+        
+        let ringNode = SCNNode(geometry: ringGeometry)
+        ringNode.name = "ring"
+        node.addChildNode(ringNode)
+        
+        // Center sphere
+        let sphereGeometry = SCNSphere(radius: 0.025)
+        let sphereMaterial = SCNMaterial()
+        sphereMaterial.diffuse.contents = UIColor.white
+        sphereMaterial.emission.contents = UIColor.white.withAlphaComponent(0.5)
+        sphereGeometry.materials = [sphereMaterial]
+        
+        let sphereNode = SCNNode(geometry: sphereGeometry)
+        sphereNode.name = "center"
+        node.addChildNode(sphereNode)
+        
+        return node
+    }
+    
+    private func updateNextTargetScreenPosition(frame: ARFrame) {
+        guard let arView = arView,
+              let targetIndex = nextTargetIndex else {
+            DispatchQueue.main.async {
+                self.nextTargetScreenPosition = nil
+            }
+            return
+        }
+        
+        let target = currentPassTargets[targetIndex]
+        let worldPos = target.worldPosition
+        
+        // Project world position to screen coordinates
+        let screenPos = arView.projectPoint(SCNVector3(worldPos.x, worldPos.y, worldPos.z))
+        
+        // Check if point is in front of camera (z < 1 means in front)
+        if screenPos.z < 1 {
+            DispatchQueue.main.async {
+                self.nextTargetScreenPosition = CGPoint(x: CGFloat(screenPos.x), y: CGFloat(screenPos.y))
+            }
+        } else {
+            // Target is behind camera, don't show line
+            DispatchQueue.main.async {
+                self.nextTargetScreenPosition = nil
+            }
+        }
+    }
+    
+    private func updateTargetVisuals(frame: ARFrame) {
+        // Find the next uncaptured target index for current pass
+        let nextIdx = nextTargetIndex
+        
+        // Update level targets
+        for (index, target) in levelTargets.enumerated() {
+            let isNext = (currentPass == .level && index == nextIdx)
+            updateNodeAppearance(target.node, isCaptured: target.isCaptured, isNext: isNext)
+            target.node.isHidden = false
+        }
+        
+        // Update tilted targets
+        for (index, target) in tiltedTargets.enumerated() {
+            let isNext = (currentPass == .tiltedUp && index == nextIdx)
+            updateNodeAppearance(target.node, isCaptured: target.isCaptured, isNext: isNext)
+            target.node.isHidden = (currentPass == .level)
+        }
+    }
+    
+    private func updateNodeAppearance(_ node: SCNNode, isCaptured: Bool, isNext: Bool) {
+        let color: UIColor
+        let scale: Float
+        
+        if isCaptured {
+            color = UIColor(red: 0.3, green: 0.85, blue: 0.4, alpha: 1.0)  // Green
+            scale = 1.0
+        } else if isNext {
+            color = UIColor(red: 1.0, green: 0.6, blue: 0.2, alpha: 1.0)  // Orange
+            scale = 1.3
+        } else {
+            color = UIColor.white.withAlphaComponent(0.6)
+            scale = 0.8
+        }
+        
+        node.scale = SCNVector3(scale, scale, scale)
+        
+        for child in node.childNodes {
+            if let geometry = child.geometry {
+                geometry.materials.first?.diffuse.contents = color
+                geometry.materials.first?.emission.contents = color.withAlphaComponent(0.5)
+            }
+        }
+    }
+    
+    // MARK: - Alignment Check
+    private func checkAlignment(frame: ARFrame) {
+        guard let targetIndex = nextTargetIndex, !isCapturing else {
+            resetAlignmentState()
+            return
+        }
+        
+        let target = currentPassTargets[targetIndex]
+        
+        // Camera info
+        let cameraTransform = frame.camera.transform
+        let cameraPos = SIMD3<Float>(cameraTransform.columns.3.x, cameraTransform.columns.3.y, cameraTransform.columns.3.z)
+        let cameraForward = -normalize(SIMD3<Float>(cameraTransform.columns.2.x, cameraTransform.columns.2.y, cameraTransform.columns.2.z))
+        
+        // Direction to target
+        let toTarget = normalize(target.worldPosition - cameraPos)
+        
+        // Angle between camera forward and target
+        let dotProduct = simd_dot(cameraForward, toTarget)
+        let clampedDot = max(-1.0, min(1.0, dotProduct))
+        let angle = acos(clampedDot)
+        
+        if angle < alignmentThreshold {
+            // Aligned with target
+            if settleStartTime == nil {
+                settleStartTime = Date()
             }
             
-            // Normalize to 0-360 from reference
-            yaw = yaw - (self.referenceYaw ?? 0)
-            if yaw < 0 { yaw += 360 }
-            if yaw >= 360 { yaw -= 360 }
+            let settleElapsed = Date().timeIntervalSince(settleStartTime!)
             
-            self.currentYaw = yaw
-            self.updateAlignment()
+            if settleElapsed >= settlingDuration {
+                // Done settling, start capture countdown
+                DispatchQueue.main.async { self.isSettling = false }
+                
+                if captureStartTime == nil {
+                    captureStartTime = Date()
+                }
+                
+                let captureElapsed = Date().timeIntervalSince(captureStartTime!)
+                let progress = min(captureElapsed / captureDuration, 1.0)
+                
+                DispatchQueue.main.async { self.captureProgress = progress }
+                
+                if progress >= 1.0 {
+                    capturePhoto(frame: frame, targetIndex: targetIndex)
+                }
+            } else {
+                // Still settling
+                DispatchQueue.main.async {
+                    self.isSettling = true
+                    self.captureProgress = 0
+                }
+            }
+        } else {
+            resetAlignmentState()
         }
     }
     
-    func stopMotionUpdates() {
-        motionManager.stopDeviceMotionUpdates()
-        isMotionActive = false
-    }
-    
-    private func updateAlignment() {
-        isAlignedWithTarget = targetAngles.contains { target in
-            let diff = abs(currentYaw - target)
-            return diff < alignmentThreshold || diff > (360 - alignmentThreshold)
+    private func resetAlignmentState() {
+        settleStartTime = nil
+        captureStartTime = nil
+        DispatchQueue.main.async {
+            self.isSettling = false
+            self.captureProgress = 0
         }
     }
     
-    private func isCurrentPositionCaptured() -> Bool {
-        for captured in capturedAngles {
-            let diff = abs(currentYaw - captured)
-            if diff < 25 || diff > 335 {
-                return true
+    // MARK: - Photo Capture
+    private func capturePhoto(frame: ARFrame, targetIndex: Int) {
+        guard !isCapturing else { return }
+        
+        DispatchQueue.main.async { self.isCapturing = true }
+        
+        // Capture the image
+        let pixelBuffer = frame.capturedImage
+        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+        let context = CIContext()
+        
+        if let cgImage = context.createCGImage(ciImage, from: ciImage.extent) {
+            let uiImage = UIImage(cgImage: cgImage, scale: 1.0, orientation: .right)
+            
+            if let compressed = uiImage.jpegData(compressionQuality: 0.8) {
+                capturedImageData.append(compressed)
+                
+                // Store angles
+                let cameraForward = -SIMD3<Float>(frame.camera.transform.columns.2.x, frame.camera.transform.columns.2.y, frame.camera.transform.columns.2.z)
+                let yaw = atan2(cameraForward.x, cameraForward.z)
+                let pitch = asin(cameraForward.y)
+                capturedAngles.append((yaw: yaw, pitch: pitch))
             }
         }
-        return false
-    }
-    
-    func capturePhoto() {
-        guard canCapture else { return }
         
-        let settings = AVCapturePhotoSettings()
-        photoOutput.capturePhoto(with: settings, delegate: self)
+        // Mark as captured
+        if currentPass == .level {
+            levelTargets[targetIndex].isCaptured = true
+        } else {
+            tiltedTargets[targetIndex].isCaptured = true
+        }
         
-        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        DispatchQueue.main.async {
+            self.capturedCount += 1
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        }
+        
+        // Reset and check completion
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            guard let self = self else { return }
+            
+            self.isCapturing = false
+            self.captureProgress = 0
+            self.settleStartTime = nil
+            self.captureStartTime = nil
+            
+            if self.currentPassCaptured >= self.photosPerPass {
+                if self.currentPass == .level {
+                    self.currentPass = .tiltedUp
+                    UINotificationFeedbackGenerator().notificationOccurred(.success)
+                } else {
+                    UINotificationFeedbackGenerator().notificationOccurred(.success)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                        self.createPanorama()
+                    }
+                }
+            }
+        }
     }
     
-    func reset() {
-        capturedImageData = []
-        capturedAngles = []
-        capturedCount = 0
-        completedImage = nil
-        referenceYaw = nil
+    func undoLastCapture() {
+        if currentPass == .level {
+            if let index = levelTargets.lastIndex(where: { $0.isCaptured }) {
+                levelTargets[index].isCaptured = false
+            }
+        } else {
+            if let index = tiltedTargets.lastIndex(where: { $0.isCaptured }) {
+                tiltedTargets[index].isCaptured = false
+            } else {
+                // Go back to level pass
+                currentPass = .level
+                if let index = levelTargets.lastIndex(where: { $0.isCaptured }) {
+                    levelTargets[index].isCaptured = false
+                }
+            }
+        }
+        
+        if !capturedImageData.isEmpty {
+            capturedImageData.removeLast()
+            capturedAngles.removeLast()
+        }
+        
+        capturedCount = max(0, capturedCount - 1)
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
     }
     
+    // MARK: - Panorama Creation
     func createPanorama() {
         guard capturedImageData.count >= 2 else { return }
         
@@ -438,55 +718,115 @@ class PanoramaCaptureManager: NSObject, ObservableObject {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             
-            autoreleasepool {
-                let result = self.stitchImages()
-                
-                DispatchQueue.main.async {
-                    self.isProcessing = false
-                    if let result = result {
-                        self.completedImage = result
-                    } else {
-                        self.errorMessage = "Failed to create panorama"
-                        self.showError = true
-                    }
+            let result = self.stitchImagesWithBlending()
+            
+            DispatchQueue.main.async {
+                self.isProcessing = false
+                if let result = result {
+                    self.completedImage = result
+                } else {
+                    self.errorMessage = "Failed to create panorama"
+                    self.showError = true
                 }
             }
         }
     }
     
-    private func stitchImages() -> UIImage? {
-        // Sort images by capture angle
+    private func stitchImagesWithBlending() -> UIImage? {
+        // Sort by yaw angle (ascending for left-to-right panorama)
         let sortedPairs = zip(capturedImageData, capturedAngles)
-            .sorted { $0.1 < $1.1 }
+            .sorted { $0.1.yaw < $1.1.yaw }
         
-        var scaledImages: [UIImage] = []
+        var images: [UIImage] = []
         
         for (data, _) in sortedPairs {
-            autoreleasepool {
-                if let image = UIImage(data: data) {
-                    let scaled = scaleImage(image, maxHeight: 600)
-                    scaledImages.append(scaled)
+            if let image = UIImage(data: data) {
+                // Scale for memory efficiency
+                let scaled = scaleImage(image, maxHeight: 1200)
+                images.append(scaled)
+            }
+        }
+        
+        guard images.count >= 2 else { return images.first }
+        
+        // Calculate overlap percentage based on FOV and number of images
+        // With 7 images covering 360°, each image covers ~51°
+        // iPhone wide camera is ~65-70° FOV, so there should be ~15° overlap
+        let overlapPercent: CGFloat = 0.25  // 25% overlap
+        
+        // Calculate final dimensions
+        let imageWidth = images.first!.size.width
+        let imageHeight = images.first!.size.height
+        let effectiveWidth = imageWidth * (1 - overlapPercent)
+        let totalWidth = effectiveWidth * CGFloat(images.count - 1) + imageWidth
+        
+        // Create output image
+        UIGraphicsBeginImageContextWithOptions(CGSize(width: totalWidth, height: imageHeight), true, 1.0)
+        guard let context = UIGraphicsGetCurrentContext() else { return nil }
+        
+        // Fill with black
+        context.setFillColor(UIColor.black.cgColor)
+        context.fill(CGRect(x: 0, y: 0, width: totalWidth, height: imageHeight))
+        
+        // Draw each image with blending
+        for (index, image) in images.enumerated() {
+            let xOffset = CGFloat(index) * effectiveWidth
+            
+            if index == 0 {
+                // First image - draw fully
+                image.draw(at: CGPoint(x: xOffset, y: 0))
+            } else {
+                // Create gradient mask for blending
+                let overlapWidth = imageWidth * overlapPercent
+                
+                // Draw the image
+                image.draw(at: CGPoint(x: xOffset, y: 0))
+                
+                // Apply gradient blend in overlap region
+                if index > 0 {
+                    let gradientRect = CGRect(x: xOffset, y: 0, width: overlapWidth, height: imageHeight)
+                    
+                    // Draw previous image's edge into overlap with gradient alpha
+                    let prevImage = images[index - 1]
+                    
+                    // Create gradient
+                    let colors = [UIColor.white.cgColor, UIColor.clear.cgColor]
+                    let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors as CFArray, locations: [0, 1])!
+                    
+                    context.saveGState()
+                    context.clip(to: gradientRect)
+                    
+                    // Draw cropped portion of previous image
+                    let cropRect = CGRect(x: prevImage.size.width - overlapWidth, y: 0, width: overlapWidth, height: imageHeight)
+                    if let croppedCG = prevImage.cgImage?.cropping(to: cropRect) {
+                        let croppedImage = UIImage(cgImage: croppedCG)
+                        
+                        // Apply gradient mask
+                        context.clip(to: gradientRect, mask: createGradientMask(size: gradientRect.size))
+                        croppedImage.draw(in: gradientRect)
+                    }
+                    
+                    context.restoreGState()
                 }
             }
         }
         
-        guard !scaledImages.isEmpty else { return nil }
+        let result = UIGraphicsGetImageFromCurrentImageContext()
+        UIGraphicsEndImageContext()
         
-        // Simple side-by-side concatenation for now
-        // OpenCV stitching was hanging - will debug separately
-        let height = scaledImages.first?.size.height ?? 600
-        let totalWidth = scaledImages.reduce(0) { $0 + $1.size.width }
+        return result
+    }
+    
+    private func createGradientMask(size: CGSize) -> CGImage {
+        let colorSpace = CGColorSpaceCreateDeviceGray()
+        let context = CGContext(data: nil, width: Int(size.width), height: Int(size.height), bitsPerComponent: 8, bytesPerRow: Int(size.width), space: colorSpace, bitmapInfo: CGImageAlphaInfo.none.rawValue)!
         
-        UIGraphicsBeginImageContextWithOptions(CGSize(width: totalWidth, height: height), true, 1.0)
-        defer { UIGraphicsEndImageContext() }
+        let colors = [UIColor.white.cgColor, UIColor.black.cgColor]
+        let gradient = CGGradient(colorsSpace: colorSpace, colors: colors as CFArray, locations: [0, 1])!
         
-        var xOffset: CGFloat = 0
-        for img in scaledImages {
-            img.draw(at: CGPoint(x: xOffset, y: 0))
-            xOffset += img.size.width
-        }
+        context.drawLinearGradient(gradient, start: CGPoint(x: 0, y: 0), end: CGPoint(x: size.width, y: 0), options: [])
         
-        return UIGraphicsGetImageFromCurrentImageContext()
+        return context.makeImage()!
     }
     
     private func scaleImage(_ image: UIImage, maxHeight: CGFloat) -> UIImage {
@@ -501,28 +841,5 @@ class PanoramaCaptureManager: NSObject, ObservableObject {
         UIGraphicsEndImageContext()
         
         return result ?? image
-    }
-}
-
-// MARK: - Photo Delegate
-extension PanoramaCaptureManager: AVCapturePhotoCaptureDelegate {
-    func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
-        guard error == nil,
-              let data = photo.fileDataRepresentation() else {
-            print("Photo capture error: \(error?.localizedDescription ?? "unknown")")
-            return
-        }
-        
-        autoreleasepool {
-            if let image = UIImage(data: data),
-               let compressed = image.jpegData(compressionQuality: 0.5) {
-                DispatchQueue.main.async { [weak self] in
-                    guard let self = self else { return }
-                    self.capturedImageData.append(compressed)
-                    self.capturedAngles.append(self.currentYaw)
-                    self.capturedCount = self.capturedImageData.count
-                }
-            }
-        }
     }
 }
