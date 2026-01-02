@@ -253,6 +253,7 @@ struct ARPanoramaViewContainer: UIViewRepresentable {
         arView.session.delegate = context.coordinator
         arView.automaticallyUpdatesLighting = true
         arView.rendersContinuously = true
+        arView.contentMode = .scaleAspectFill
         
         captureManager.arView = arView
         
@@ -365,15 +366,33 @@ class ARPanoramaCaptureManager: ObservableObject {
         configuration.worldAlignment = .gravity
         configuration.isAutoFocusEnabled = true
         
-        // Select a video format without aggressive cropping
-        // Look for 1920x1440 or similar 4:3 format which uses more of the sensor
+        // Find the video format with the widest field of view
+        // 4:3 formats use more of the sensor = wider effective FOV than 16:9
         let supportedFormats = ARWorldTrackingConfiguration.supportedVideoFormats
-        if let preferredFormat = supportedFormats.first(where: { format in
-            // 4:3 formats use more of the sensor = wider effective FOV
+        
+        // Debug: Print available formats
+        print("Available AR video formats:")
+        for format in supportedFormats {
             let ratio = format.imageResolution.width / format.imageResolution.height
-            return ratio < 1.5 // 4:3 = 1.33, 16:9 = 1.78
-        }) {
-            configuration.videoFormat = preferredFormat
+            print("  \(format.imageResolution.width)x\(format.imageResolution.height) @ \(format.framesPerSecond)fps (ratio: \(ratio))")
+        }
+        
+        // Prefer 4:3 format (ratio ~1.33) for widest FOV, then highest resolution
+        if let bestFormat = supportedFormats
+            .filter({ $0.framesPerSecond == 30 })
+            .sorted(by: { f1, f2 in
+                let ratio1 = f1.imageResolution.width / f1.imageResolution.height
+                let ratio2 = f2.imageResolution.width / f2.imageResolution.height
+                // Prefer 4:3 (1.33) over 16:9 (1.78)
+                let is4_3_1 = ratio1 < 1.5
+                let is4_3_2 = ratio2 < 1.5
+                if is4_3_1 != is4_3_2 { return is4_3_1 }
+                // Then prefer higher resolution
+                return f1.imageResolution.width > f2.imageResolution.width
+            })
+            .first {
+            configuration.videoFormat = bestFormat
+            print("Selected AR format: \(bestFormat.imageResolution.width)x\(bestFormat.imageResolution.height)")
         }
         
         arView.session.run(configuration, options: [.resetTracking, .removeExistingAnchors])
@@ -418,13 +437,15 @@ class ARPanoramaCaptureManager: ObservableObject {
         
         let angleStep = Float.pi * 2 / Float(photosPerPass)
         
-        // Create level targets (around horizon) - CLOCKWISE (negative angle)
+        // Create level targets (angled DOWN 15° to capture more floor) - CLOCKWISE
+        let levelDownAngle: Float = 15 * .pi / 180  // 15 degrees down
         for i in 0..<photosPerPass {
             let yaw = initialYaw - Float(i) * angleStep  // Negative for clockwise
             
-            let x = cameraPos.x + dotDistance * sin(yaw)
-            let y = cameraPos.y  // Same height as camera
-            let z = cameraPos.z + dotDistance * cos(yaw)
+            let horizontalDist = dotDistance * cos(levelDownAngle)
+            let x = cameraPos.x + horizontalDist * sin(yaw)
+            let y = cameraPos.y - dotDistance * sin(levelDownAngle)  // Below camera
+            let z = cameraPos.z + horizontalDist * cos(yaw)
             
             let worldPos = SIMD3<Float>(x, y, z)
             let node = createTargetNode()
@@ -733,75 +754,91 @@ class ARPanoramaCaptureManager: ObservableObject {
     }
     
     private func stitchImagesWithBlending() -> UIImage? {
-        // Sort by yaw angle (ascending for left-to-right panorama)
-        let sortedPairs = zip(capturedImageData, capturedAngles)
-            .sorted { $0.1.yaw < $1.1.yaw }
+        // Separate level and upper pass photos based on pitch angle
+        // Level pass: pitch ≈ -15° (-0.26 rad), Upper pass: pitch ≈ +25° (+0.44 rad)
+        // Threshold at 5° (0.087 rad) - negative pitch = level, positive pitch = upper
+        let pitchThreshold: Float = 0.087
         
-        var images: [UIImage] = []
+        var levelPhotos: [(data: Data, yaw: Float)] = []
+        var upperPhotos: [(data: Data, yaw: Float)] = []
         
-        for (data, _) in sortedPairs {
-            if let image = UIImage(data: data) {
-                // Scale for memory efficiency
-                let scaled = scaleImage(image, maxHeight: 1200)
-                images.append(scaled)
+        for (data, angles) in zip(capturedImageData, capturedAngles) {
+            if angles.pitch > pitchThreshold {
+                upperPhotos.append((data: data, yaw: angles.yaw))
+            } else {
+                levelPhotos.append((data: data, yaw: angles.yaw))
             }
         }
         
-        guard images.count >= 2 else { return images.first }
+        // Sort each pass by yaw (descending - clockwise capture direction)
+        levelPhotos.sort { $0.yaw > $1.yaw }
+        upperPhotos.sort { $0.yaw > $1.yaw }
         
-        // Calculate overlap percentage based on FOV and number of images
-        // With 7 images covering 360°, each image covers ~51°
-        // iPhone wide camera is ~65-70° FOV, so there should be ~15° overlap
-        let overlapPercent: CGFloat = 0.25  // 25% overlap
+        // Convert to UIImages
+        func loadImages(_ photos: [(data: Data, yaw: Float)]) -> [UIImage] {
+            photos.compactMap { pair in
+                if let image = UIImage(data: pair.data) {
+                    return scaleImage(image, maxHeight: 1200)
+                }
+                return nil
+            }
+        }
         
-        // Calculate final dimensions
-        let imageWidth = images.first!.size.width
-        let imageHeight = images.first!.size.height
+        let levelImages = loadImages(levelPhotos)
+        let upperImages = loadImages(upperPhotos)
+        
+        guard !levelImages.isEmpty else { return nil }
+        
+        // Calculate dimensions
+        let imageWidth = levelImages.first!.size.width
+        let imageHeight = levelImages.first!.size.height
+        let overlapPercent: CGFloat = 0.25
         let effectiveWidth = imageWidth * (1 - overlapPercent)
-        let totalWidth = effectiveWidth * CGFloat(images.count - 1) + imageWidth
+        
+        // Width based on level pass (7 photos)
+        let rowWidth = effectiveWidth * CGFloat(levelImages.count - 1) + imageWidth
+        
+        // Height: if we have upper photos, add partial height for top row
+        // Upper row overlaps with top portion of level row
+        let verticalOverlap: CGFloat = imageHeight * 0.3  // 30% vertical overlap
+        let totalHeight: CGFloat
+        if upperImages.isEmpty {
+            totalHeight = imageHeight
+        } else {
+            totalHeight = imageHeight + (imageHeight - verticalOverlap)
+        }
         
         // Create output image
-        UIGraphicsBeginImageContextWithOptions(CGSize(width: totalWidth, height: imageHeight), true, 1.0)
+        UIGraphicsBeginImageContextWithOptions(CGSize(width: rowWidth, height: totalHeight), true, 1.0)
         guard let context = UIGraphicsGetCurrentContext() else { return nil }
         
         // Fill with black
         context.setFillColor(UIColor.black.cgColor)
-        context.fill(CGRect(x: 0, y: 0, width: totalWidth, height: imageHeight))
+        context.fill(CGRect(x: 0, y: 0, width: rowWidth, height: totalHeight))
         
-        // Draw each image with blending
-        for (index, image) in images.enumerated() {
-            let xOffset = CGFloat(index) * effectiveWidth
-            
-            if index == 0 {
-                // First image - draw fully
-                image.draw(at: CGPoint(x: xOffset, y: 0))
-            } else {
-                // Create gradient mask for blending
-                let overlapWidth = imageWidth * overlapPercent
+        // Helper function to draw a row of images
+        func drawRow(images: [UIImage], yOffset: CGFloat) {
+            for (index, image) in images.enumerated() {
+                let xOffset = CGFloat(index) * effectiveWidth
                 
-                // Draw the image
-                image.draw(at: CGPoint(x: xOffset, y: 0))
-                
-                // Apply gradient blend in overlap region
-                if index > 0 {
-                    let gradientRect = CGRect(x: xOffset, y: 0, width: overlapWidth, height: imageHeight)
+                if index == 0 {
+                    image.draw(at: CGPoint(x: xOffset, y: yOffset))
+                } else {
+                    // Draw with gradient blending
+                    image.draw(at: CGPoint(x: xOffset, y: yOffset))
                     
-                    // Draw previous image's edge into overlap with gradient alpha
+                    // Blend overlap region
+                    let overlapWidth = imageWidth * overlapPercent
+                    let gradientRect = CGRect(x: xOffset, y: yOffset, width: overlapWidth, height: imageHeight)
+                    
                     let prevImage = images[index - 1]
-                    
-                    // Create gradient
-                    let colors = [UIColor.white.cgColor, UIColor.clear.cgColor]
-                    let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors as CFArray, locations: [0, 1])!
                     
                     context.saveGState()
                     context.clip(to: gradientRect)
                     
-                    // Draw cropped portion of previous image
                     let cropRect = CGRect(x: prevImage.size.width - overlapWidth, y: 0, width: overlapWidth, height: imageHeight)
                     if let croppedCG = prevImage.cgImage?.cropping(to: cropRect) {
                         let croppedImage = UIImage(cgImage: croppedCG)
-                        
-                        // Apply gradient mask
                         context.clip(to: gradientRect, mask: createGradientMask(size: gradientRect.size))
                         croppedImage.draw(in: gradientRect)
                     }
@@ -809,6 +846,77 @@ class ARPanoramaCaptureManager: ObservableObject {
                     context.restoreGState()
                 }
             }
+        }
+        
+        // Draw level pass (bottom row)
+        let levelYOffset = upperImages.isEmpty ? 0 : (imageHeight - verticalOverlap)
+        drawRow(images: levelImages, yOffset: levelYOffset)
+        
+        // Draw upper pass (top row) if we have upper photos
+        if !upperImages.isEmpty {
+            // Calculate the yaw offset between first level and first upper photo
+            // to properly align the rows
+            let levelFirstYaw = levelPhotos.first?.yaw ?? 0
+            let upperFirstYaw = upperPhotos.first?.yaw ?? 0
+            let yawDifference = Double(levelFirstYaw - upperFirstYaw)
+            
+            // Convert yaw difference to pixel offset
+            // Each photo covers about 51° (360/7), effectiveWidth covers 75% of that
+            let degreesPerPixel = (360.0 / 7.0 * 0.75) / Double(effectiveWidth)
+            let xAlignmentOffset = CGFloat(yawDifference / degreesPerPixel)
+            
+            // Draw upper row with horizontal blending
+            for (index, image) in upperImages.enumerated() {
+                let xOffset = CGFloat(index) * effectiveWidth + xAlignmentOffset
+                
+                context.saveGState()
+                context.clip(to: CGRect(x: 0, y: 0, width: rowWidth, height: totalHeight))
+                
+                if index == 0 {
+                    image.draw(at: CGPoint(x: xOffset, y: 0))
+                } else {
+                    image.draw(at: CGPoint(x: xOffset, y: 0))
+                    
+                    // Horizontal blend with previous upper image
+                    let overlapWidth = imageWidth * overlapPercent
+                    let gradientRect = CGRect(x: xOffset, y: 0, width: overlapWidth, height: imageHeight)
+                    let prevImage = upperImages[index - 1]
+                    
+                    context.saveGState()
+                    context.clip(to: gradientRect)
+                    let cropRect = CGRect(x: prevImage.size.width - overlapWidth, y: 0, width: overlapWidth, height: imageHeight)
+                    if let croppedCG = prevImage.cgImage?.cropping(to: cropRect) {
+                        let croppedImage = UIImage(cgImage: croppedCG)
+                        context.clip(to: gradientRect, mask: createGradientMask(size: gradientRect.size))
+                        croppedImage.draw(in: gradientRect)
+                    }
+                    context.restoreGState()
+                }
+                
+                context.restoreGState()
+            }
+            
+            // Apply vertical blend between upper and level rows
+            let blendHeight = verticalOverlap
+            let blendY = imageHeight - verticalOverlap  // Where upper row meets level row
+            let blendRect = CGRect(x: 0, y: blendY, width: rowWidth, height: blendHeight)
+            
+            // Create vertical gradient mask for blending
+            context.saveGState()
+            context.clip(to: blendRect)
+            let verticalMask = createVerticalGradientMask(size: CGSize(width: rowWidth, height: blendHeight))
+            context.clip(to: blendRect, mask: verticalMask)
+            
+            // Redraw level row in blend region with gradient
+            for (index, image) in levelImages.enumerated() {
+                let xOffset = CGFloat(index) * effectiveWidth
+                let sourceRect = CGRect(x: 0, y: 0, width: image.size.width, height: blendHeight)
+                if let croppedCG = image.cgImage?.cropping(to: sourceRect) {
+                    let croppedImage = UIImage(cgImage: croppedCG)
+                    croppedImage.draw(in: CGRect(x: xOffset, y: blendY, width: image.size.width, height: blendHeight))
+                }
+            }
+            context.restoreGState()
         }
         
         let result = UIGraphicsGetImageFromCurrentImageContext()
@@ -825,6 +933,19 @@ class ARPanoramaCaptureManager: ObservableObject {
         let gradient = CGGradient(colorsSpace: colorSpace, colors: colors as CFArray, locations: [0, 1])!
         
         context.drawLinearGradient(gradient, start: CGPoint(x: 0, y: 0), end: CGPoint(x: size.width, y: 0), options: [])
+        
+        return context.makeImage()!
+    }
+    
+    private func createVerticalGradientMask(size: CGSize) -> CGImage {
+        let colorSpace = CGColorSpaceCreateDeviceGray()
+        let context = CGContext(data: nil, width: Int(size.width), height: Int(size.height), bitsPerComponent: 8, bytesPerRow: Int(size.width), space: colorSpace, bitmapInfo: CGImageAlphaInfo.none.rawValue)!
+        
+        // White at top (keep upper), black at bottom (show level)
+        let colors = [UIColor.black.cgColor, UIColor.white.cgColor]
+        let gradient = CGGradient(colorsSpace: colorSpace, colors: colors as CFArray, locations: [0, 1])!
+        
+        context.drawLinearGradient(gradient, start: CGPoint(x: 0, y: 0), end: CGPoint(x: 0, y: size.height), options: [])
         
         return context.makeImage()!
     }

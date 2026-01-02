@@ -26,6 +26,7 @@ struct Viewer360View: View {
     // Camera control
     @State private var yaw: Double = 0
     @State private var pitch: Double = 0
+    @State private var fov: Double = 75  // Field of view for zoom (smaller = more zoomed in)
     
     // Placement mode
     @State private var isPlacingAnnotation = false
@@ -42,6 +43,7 @@ struct Viewer360View: View {
                     image: image,
                     yaw: $yaw,
                     pitch: $pitch,
+                    fov: $fov,
                     annotations: hotspot.annotations,
                     onAnnotationTap: { annotation in
                         if !isPlacingAnnotation {
@@ -106,6 +108,9 @@ struct Viewer360View: View {
             if let annotation = selectedAnnotation {
                 AnnotationDetailSheet(
                     annotation: annotation,
+                    onSave: { updatedAnnotation in
+                        updateAnnotation(updatedAnnotation)
+                    },
                     onDelete: {
                         deleteAnnotation(annotation)
                     }
@@ -306,6 +311,16 @@ struct Viewer360View: View {
         saveTour()
     }
     
+    private func updateAnnotation(_ annotation: Annotation) {
+        guard var hotspot = currentHotspot,
+              let hotspotIndex = tour.hotspots.firstIndex(where: { $0.id == hotspot.id }),
+              let annotationIndex = hotspot.annotations.firstIndex(where: { $0.id == annotation.id }) else { return }
+        hotspot.annotations[annotationIndex] = annotation
+        tour.hotspots[hotspotIndex] = hotspot
+        currentHotspot = hotspot
+        saveTour()
+    }
+
     private func deleteAnnotation(_ annotation: Annotation) {
         guard var hotspot = currentHotspot,
               let index = tour.hotspots.firstIndex(where: { $0.id == hotspot.id }) else { return }
@@ -406,11 +421,28 @@ struct AddAnnotationSheet: View {
     }
 }
 
-// MARK: - Annotation Detail Sheet
+// MARK: - Annotation Detail Sheet (Editable)
 struct AnnotationDetailSheet: View {
     @Environment(\.dismiss) var dismiss
     let annotation: Annotation
+    var onSave: (Annotation) -> Void
     var onDelete: () -> Void
+    
+    @State private var title: String
+    @State private var description: String
+    @State private var category: Annotation.AnnotationCategory
+    @State private var tagsText: String
+    @State private var isEditing = false
+    
+    init(annotation: Annotation, onSave: @escaping (Annotation) -> Void, onDelete: @escaping () -> Void) {
+        self.annotation = annotation
+        self.onSave = onSave
+        self.onDelete = onDelete
+        _title = State(initialValue: annotation.title)
+        _description = State(initialValue: annotation.description.isEmpty ? annotation.content : annotation.description)
+        _category = State(initialValue: annotation.category)
+        _tagsText = State(initialValue: annotation.tags.joined(separator: ", "))
+    }
     
     var body: some View {
         NavigationStack {
@@ -418,33 +450,72 @@ struct AnnotationDetailSheet: View {
                 Color.sasDarkBg.ignoresSafeArea()
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
-                        if !annotation.title.isEmpty {
-                            Text(annotation.title).font(.title2).fontWeight(.bold).foregroundColor(.sasTextPrimary)
-                        }
-                        HStack {
-                            Text(annotation.category.rawValue).font(.caption).fontWeight(.medium)
-                                .padding(.horizontal, 10).padding(.vertical, 4)
-                                .background(Color.sasBlue.opacity(0.2)).foregroundColor(.sasBlue).cornerRadius(12)
-                            Spacer()
-                        }
-                        if !annotation.tags.isEmpty {
-                            ScrollView(.horizontal, showsIndicators: false) {
-                                HStack(spacing: 8) {
-                                    ForEach(annotation.tags, id: \.self) { tag in
-                                        Text("#\(tag)").font(.caption)
-                                            .padding(.horizontal, 8).padding(.vertical, 4)
-                                            .background(Color.sasOrange.opacity(0.2))
-                                            .foregroundColor(.sasOrange).cornerRadius(8)
+                        if isEditing {
+                            // Editable fields
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("Title").font(.subheadline).foregroundColor(.sasTextSecondary)
+                                TextField("Title", text: $title)
+                                    .textFieldStyle(.plain).padding()
+                                    .background(Color.sasCardBg).cornerRadius(10)
+                                    .foregroundColor(.sasTextPrimary)
+                            }
+                            
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("Category").font(.subheadline).foregroundColor(.sasTextSecondary)
+                                Picker("Category", selection: $category) {
+                                    ForEach(Annotation.AnnotationCategory.allCases, id: \.self) { cat in
+                                        Text(cat.rawValue).tag(cat)
+                                    }
+                                }
+                                .pickerStyle(.segmented)
+                            }
+                            
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("Tags (comma separated)").font(.subheadline).foregroundColor(.sasTextSecondary)
+                                TextField("pump, motor, maintenance", text: $tagsText)
+                                    .textFieldStyle(.plain).padding()
+                                    .background(Color.sasCardBg).cornerRadius(10)
+                                    .foregroundColor(.sasTextPrimary)
+                            }
+                            
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("Description").font(.subheadline).foregroundColor(.sasTextSecondary)
+                                TextEditor(text: $description)
+                                    .frame(minHeight: 120)
+                                    .padding(8)
+                                    .background(Color.sasCardBg).cornerRadius(10)
+                                    .foregroundColor(.sasTextPrimary)
+                                    .scrollContentBackground(.hidden)
+                            }
+                        } else {
+                            // Read-only view
+                            if !title.isEmpty {
+                                Text(title).font(.title2).fontWeight(.bold).foregroundColor(.sasTextPrimary)
+                            }
+                            HStack {
+                                Text(category.rawValue).font(.caption).fontWeight(.medium)
+                                    .padding(.horizontal, 10).padding(.vertical, 4)
+                                    .background(Color.sasBlue.opacity(0.2)).foregroundColor(.sasBlue).cornerRadius(12)
+                                Spacer()
+                            }
+                            if !annotation.tags.isEmpty {
+                                ScrollView(.horizontal, showsIndicators: false) {
+                                    HStack(spacing: 8) {
+                                        ForEach(annotation.tags, id: \.self) { tag in
+                                            Text("#\(tag)").font(.caption)
+                                                .padding(.horizontal, 8).padding(.vertical, 4)
+                                                .background(Color.sasOrange.opacity(0.2))
+                                                .foregroundColor(.sasOrange).cornerRadius(8)
+                                        }
                                     }
                                 }
                             }
+                            Divider()
+                            if !description.isEmpty {
+                                Text(description).font(.body).foregroundColor(.sasTextPrimary)
+                            }
                         }
-                        Divider()
-                        if !annotation.description.isEmpty {
-                            Text(annotation.description).font(.body).foregroundColor(.sasTextPrimary)
-                        } else if !annotation.content.isEmpty {
-                            Text(annotation.content).font(.body).foregroundColor(.sasTextPrimary)
-                        }
+                        
                         Divider()
                         VStack(alignment: .leading, spacing: 8) {
                             if !annotation.author.isEmpty {
@@ -458,24 +529,63 @@ struct AnnotationDetailSheet: View {
                                 Text(annotation.createdAt.formatted()).foregroundColor(.sasTextSecondary)
                             }.font(.caption)
                         }
+                        
                         Spacer(minLength: 40)
-                        Button(action: { onDelete(); dismiss() }) {
-                            HStack { Image(systemName: "trash"); Text("Delete Annotation") }
-                                .foregroundColor(.sasError).frame(maxWidth: .infinity).padding()
-                                .background(Color.sasError.opacity(0.1)).cornerRadius(10)
+                        
+                        if !isEditing {
+                            Button(action: { onDelete(); dismiss() }) {
+                                HStack { Image(systemName: "trash"); Text("Delete Annotation") }
+                                    .foregroundColor(.sasError).frame(maxWidth: .infinity).padding()
+                                    .background(Color.sasError.opacity(0.1)).cornerRadius(10)
+                            }
                         }
                     }
                     .padding(16)
                 }
             }
-            .navigationTitle("Annotation")
+            .navigationTitle(isEditing ? "Edit Annotation" : "Annotation")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    if isEditing {
+                        Button("Cancel") {
+                            // Reset to original values
+                            title = annotation.title
+                            description = annotation.description.isEmpty ? annotation.content : annotation.description
+                            category = annotation.category
+                            tagsText = annotation.tags.joined(separator: ", ")
+                            isEditing = false
+                        }.foregroundColor(.sasOrange)
+                    }
+                }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }.foregroundColor(.sasOrange)
+                    if isEditing {
+                        Button("Save") {
+                            saveChanges()
+                        }.foregroundColor(.sasOrange)
+                    } else {
+                        Button("Edit") {
+                            isEditing = true
+                        }.foregroundColor(.sasOrange)
+                    }
                 }
             }
         }
+    }
+    
+    private func saveChanges() {
+        let tags = tagsText.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        
+        var updated = annotation
+        updated.title = title
+        updated.description = description
+        updated.content = description
+        updated.category = category
+        updated.tags = tags
+        
+        onSave(updated)
+        isEditing = false
+        dismiss()
     }
 }
 
@@ -484,6 +594,7 @@ struct SceneView360: UIViewRepresentable {
     let image: UIImage
     @Binding var yaw: Double
     @Binding var pitch: Double
+    @Binding var fov: Double
     let annotations: [Annotation]
     var onAnnotationTap: (Annotation) -> Void
     var onDoubleTap: (SphericalPosition) -> Void
@@ -497,6 +608,9 @@ struct SceneView360: UIViewRepresentable {
         
         let panGesture = UIPanGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handlePan(_:)))
         scnView.addGestureRecognizer(panGesture)
+        
+        let pinchGesture = UIPinchGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handlePinch(_:)))
+        scnView.addGestureRecognizer(pinchGesture)
         
         let doubleTap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleDoubleTap(_:)))
         doubleTap.numberOfTapsRequired = 2
@@ -514,6 +628,7 @@ struct SceneView360: UIViewRepresentable {
     func updateUIView(_ scnView: SCNView, context: Context) {
         if let cameraNode = scnView.scene?.rootNode.childNode(withName: "camera", recursively: false) {
             cameraNode.eulerAngles = SCNVector3(Float(pitch * .pi / 180), Float(-yaw * .pi / 180), 0)
+            cameraNode.camera?.fieldOfView = CGFloat(fov)
         }
         context.coordinator.updateAnnotations(annotations, in: scnView.scene)
     }
@@ -568,6 +683,16 @@ struct SceneView360: UIViewRepresentable {
             if parent.yaw > 360 { parent.yaw -= 360 }
             if parent.yaw < 0 { parent.yaw += 360 }
             gesture.setTranslation(.zero, in: gesture.view)
+        }
+        
+        @objc func handlePinch(_ gesture: UIPinchGestureRecognizer) {
+            if gesture.state == .changed {
+                // Decrease FOV when pinching in (zooming in), increase when pinching out
+                let newFov = parent.fov / Double(gesture.scale)
+                // Clamp FOV between 20 (zoomed in) and 120 (zoomed out)
+                parent.fov = max(20, min(120, newFov))
+                gesture.scale = 1.0
+            }
         }
         
         @objc func handleDoubleTap(_ gesture: UITapGestureRecognizer) {
@@ -636,4 +761,5 @@ struct SceneView360: UIViewRepresentable {
         }
     }
 }
+
 
