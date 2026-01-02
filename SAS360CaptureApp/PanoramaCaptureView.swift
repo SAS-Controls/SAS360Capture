@@ -843,3 +843,4 @@ class ARPanoramaCaptureManager: ObservableObject {
         return result ?? image
     }
 }
+
