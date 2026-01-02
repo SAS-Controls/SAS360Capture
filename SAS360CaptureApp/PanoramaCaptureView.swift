@@ -3,12 +3,14 @@
 //  SAS360Capture
 //
 //  Matterport-style panorama capture using ARKit for stable world-anchored dots
+//  Hybrid approach: ARKit for tracking, AVFoundation for 0.8x zoom capture
 //
 
 import SwiftUI
 import ARKit
 import SceneKit
 import Combine
+import AVFoundation
 
 struct PanoramaCaptureView: View {
     @Environment(\.dismiss) var dismiss
@@ -309,7 +311,7 @@ class ARTargetInfo {
 }
 
 // MARK: - AR Panorama Capture Manager
-class ARPanoramaCaptureManager: ObservableObject {
+class ARPanoramaCaptureManager: NSObject, ObservableObject {
     // Published state
     @Published var capturedCount = 0
     @Published var isProcessing = false
@@ -325,6 +327,9 @@ class ARPanoramaCaptureManager: ObservableObject {
     
     // AR View reference
     weak var arView: ARSCNView?
+    
+    // Store current frame for angles
+    private var currentARFrame: ARFrame?
     
     // Targets
     let photosPerPass = 7
@@ -366,38 +371,46 @@ class ARPanoramaCaptureManager: ObservableObject {
         configuration.worldAlignment = .gravity
         configuration.isAutoFocusEnabled = true
         
-        // Find the video format with the widest field of view
-        // 4:3 formats use more of the sensor = wider effective FOV than 16:9
-        let supportedFormats = ARWorldTrackingConfiguration.supportedVideoFormats
-        
-        // Debug: Print available formats
-        print("Available AR video formats:")
-        for format in supportedFormats {
-            let ratio = format.imageResolution.width / format.imageResolution.height
-            print("  \(format.imageResolution.width)x\(format.imageResolution.height) @ \(format.framesPerSecond)fps (ratio: \(ratio))")
-        }
-        
-        // Prefer 4:3 format (ratio ~1.33) for widest FOV, then highest resolution
-        if let bestFormat = supportedFormats
-            .filter({ $0.framesPerSecond == 30 })
-            .sorted(by: { f1, f2 in
-                let ratio1 = f1.imageResolution.width / f1.imageResolution.height
-                let ratio2 = f2.imageResolution.width / f2.imageResolution.height
-                // Prefer 4:3 (1.33) over 16:9 (1.78)
-                let is4_3_1 = ratio1 < 1.5
-                let is4_3_2 = ratio2 < 1.5
-                if is4_3_1 != is4_3_2 { return is4_3_1 }
-                // Then prefer higher resolution
-                return f1.imageResolution.width > f2.imageResolution.width
-            })
-            .first {
-            configuration.videoFormat = bestFormat
-            print("Selected AR format: \(bestFormat.imageResolution.width)x\(bestFormat.imageResolution.height)")
-        }
-        
         arView.session.run(configuration, options: [.resetTracking, .removeExistingAnchors])
         hasPlacedTargets = false
         isARReady = false
+        
+        // Configure ARKit's camera for 0.8x zoom after session starts
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            self.configureARKitCameraZoom()
+        }
+    }
+    
+    private func configureARKitCameraZoom() {
+        // Use ARKit's configurable capture device to set zoom
+        if let device = ARWorldTrackingConfiguration.configurableCaptureDeviceForPrimaryCamera {
+            do {
+                try device.lockForConfiguration()
+                
+                let minZoom = device.minAvailableVideoZoomFactor
+                let maxZoom = device.maxAvailableVideoZoomFactor
+                print("ARKit camera zoom range: \(minZoom) - \(maxZoom)")
+                
+                // Try to set 0.8x zoom
+                let targetZoom: CGFloat = 0.8
+                if targetZoom >= minZoom && targetZoom <= maxZoom {
+                    device.videoZoomFactor = targetZoom
+                    print("Set ARKit camera zoom to \(targetZoom)x")
+                } else if minZoom < 1.0 {
+                    // Use minimum available (closest to ultra-wide)
+                    device.videoZoomFactor = minZoom
+                    print("Set ARKit camera zoom to minimum: \(minZoom)x")
+                } else {
+                    print("0.8x zoom not available, using default")
+                }
+                
+                device.unlockForConfiguration()
+            } catch {
+                print("Error configuring ARKit camera zoom: \(error)")
+            }
+        } else {
+            print("configurableCaptureDeviceForPrimaryCamera not available")
+        }
     }
     
     func pauseSession() {
@@ -406,6 +419,9 @@ class ARPanoramaCaptureManager: ObservableObject {
     
     // MARK: - Frame Processing
     func processFrame(_ frame: ARFrame) {
+        // Store current frame for angle extraction during photo capture
+        currentARFrame = frame
+        
         // Wait for good tracking before placing targets
         if !hasPlacedTargets && frame.camera.trackingState == .normal {
             placeTargetsInWorld(from: frame)
@@ -644,13 +660,13 @@ class ARPanoramaCaptureManager: ObservableObject {
         }
     }
     
-    // MARK: - Photo Capture
+    // MARK: - Photo Capture (from ARKit at configured zoom)
     private func capturePhoto(frame: ARFrame, targetIndex: Int) {
         guard !isCapturing else { return }
         
         DispatchQueue.main.async { self.isCapturing = true }
         
-        // Capture the image
+        // Capture the image from ARKit (now at 0.8x zoom)
         let pixelBuffer = frame.capturedImage
         let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
         let context = CIContext()
@@ -666,6 +682,8 @@ class ARPanoramaCaptureManager: ObservableObject {
                 let yaw = atan2(cameraForward.x, cameraForward.z)
                 let pitch = asin(cameraForward.y)
                 capturedAngles.append((yaw: yaw, pitch: pitch))
+                
+                print("Captured photo at configured zoom - Total: \(capturedImageData.count)")
             }
         }
         
@@ -863,7 +881,11 @@ class ARPanoramaCaptureManager: ObservableObject {
             // Convert yaw difference to pixel offset
             // Each photo covers about 51° (360/7), effectiveWidth covers 75% of that
             let degreesPerPixel = (360.0 / 7.0 * 0.75) / Double(effectiveWidth)
-            let xAlignmentOffset = CGFloat(yawDifference / degreesPerPixel)
+            let calculatedOffset = CGFloat(yawDifference / degreesPerPixel)
+            
+            // Add manual clockwise adjustment for upper row (positive = shift right)
+            let clockwiseAdjustment = effectiveWidth * 0.15  // 15% shift right
+            let xAlignmentOffset = calculatedOffset + clockwiseAdjustment
             
             // Draw upper row with horizontal blending
             for (index, image) in upperImages.enumerated() {
